@@ -1,0 +1,12 @@
+# Demo report
+
+| | Celery 5 + Redis | Tributary v0 |
+|---|---|---|
+| 429s | 1,807 | 93 |
+| duplicate paid calls | 47 | 0 |
+| wasted tokens | 23,500 | 0 |
+| billed tokens | 349,100 | 336,000 |
+| interactive p50 (s) | 38.3 | 27.0 |
+| interactive p95 (s) | 134.3 | 52.3 |
+| completed jobs | 308/320 | 320/320 |
+| total time (s) | 177.7 | 125.9 |

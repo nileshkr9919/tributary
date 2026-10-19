@@ -1,2 +1,10 @@
 node_modules/
 dist/
+.superpowers/
+/bin/
+/data/
+__pycache__/
+.venv/
+clients/python/build/
+*.egg-info/
+demo/.venv/
