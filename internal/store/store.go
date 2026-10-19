@@ -11,13 +11,18 @@ import (
 
 // Store is a durable ordered key-value store.
 type Store struct {
-	db   *pebble.DB
-	once sync.Once
-	err  error
+	db      *pebble.DB
+	once    sync.Once
+	err     error
+	failMu  sync.Mutex
+	failErr error
 }
 
 // Batch is an atomic group of writes.
-type Batch struct{ b *pebble.Batch }
+type Batch struct {
+	b *pebble.Batch
+	s *Store
+}
 
 // Open opens or creates a store in dir.
 func Open(dir string) (*Store, error) {
@@ -49,7 +54,15 @@ func (s *Store) Get(key []byte) ([]byte, bool, error) {
 }
 
 // NewBatch starts an atomic batch.
-func (s *Store) NewBatch() *Batch { return &Batch{b: s.db.NewBatch()} }
+func (s *Store) NewBatch() *Batch { return &Batch{b: s.db.NewBatch(), s: s} }
+
+// FailCommits makes every later commit fail with err, without writing (nil restores).
+// It exists to test how callers handle disk failures.
+func (s *Store) FailCommits(err error) {
+	s.failMu.Lock()
+	s.failErr = err
+	s.failMu.Unlock()
+}
 
 // Set stages a write.
 func (b *Batch) Set(k, v []byte) { _ = b.b.Set(k, v, nil) }
@@ -63,6 +76,12 @@ func (b *Batch) Empty() bool { return b.b.Empty() }
 // Commit applies the batch and fsyncs before returning. Concurrent commits share fsyncs.
 func (b *Batch) Commit() error {
 	defer b.b.Close()
+	b.s.failMu.Lock()
+	err := b.s.failErr
+	b.s.failMu.Unlock()
+	if err != nil {
+		return err
+	}
 	return b.b.Commit(pebble.Sync)
 }
 

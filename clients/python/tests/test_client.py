@@ -170,6 +170,34 @@ class ClientTest(unittest.TestCase):
         metrics = urllib.request.urlopen(self.url + "/metrics").read().decode()
         self.assertIn('trib_usage_total{subscription="llm-sub",field="tokens",label="acme"} 250', metrics)
 
+    def test_names_with_spaces(self):
+        self.c.create_topic("my jobs", shards=1)
+        self.c.create_subscription("my sub", "my jobs")
+        self.c.publish("my jobs", "x")
+        seen = []
+        self.run_until(Worker(self.c, "my sub", lambda job: seen.append(job.payload)), lambda: seen == ["x"])
+        self.assertEqual(self.c.stats("my sub")["name"], "my sub")
+
+    def test_worker_survives_unexpected_receive_error(self):
+        sub = self.topic("flaky")
+        self.c.publish("flaky", "x")
+        seen = []
+        w = Worker(self.c, sub, lambda job: seen.append(job.payload))
+        real = self.c.receive
+        calls = {"n": 0}
+
+        def flaky(*a, **k):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise ValueError("unexpected body")
+            return real(*a, **k)
+
+        self.c.receive = flaky
+        try:
+            self.run_until(w, lambda: seen == ["x"])
+        finally:
+            self.c.receive = real
+
 
 if __name__ == "__main__":
     unittest.main()

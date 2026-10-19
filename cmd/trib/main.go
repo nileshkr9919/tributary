@@ -49,7 +49,8 @@ func main() {
 			os.Exit(2)
 		}
 		if err := serve(*data, *listen, false); err != nil {
-			log.Fatal(err)
+			fmt.Fprintln(os.Stderr, "trib:", err)
+			os.Exit(1)
 		}
 	case "dev":
 		fs := flag.NewFlagSet("dev", flag.ExitOnError)
@@ -57,11 +58,14 @@ func main() {
 		fs.Parse(os.Args[2:])
 		dir, err := os.MkdirTemp("", "trib-dev-*")
 		if err != nil {
-			log.Fatal(err)
+			fmt.Fprintln(os.Stderr, "trib:", err)
+			os.Exit(1)
 		}
-		defer os.RemoveAll(dir)
-		if err := serve(dir, *listen, true); err != nil {
-			log.Fatal(err)
+		err = serve(dir, *listen, true)
+		os.RemoveAll(dir) // always, even on error
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "trib:", err)
+			os.Exit(1)
 		}
 	case "-h", "--help", "help":
 		usage()
@@ -81,7 +85,11 @@ func serve(dir, listen string, dev bool) error {
 	if err != nil {
 		return err
 	}
-	srv := &http.Server{Handler: api.Handler(b), ReadHeaderTimeout: 10 * time.Second}
+	// Request contexts derive from base, so cancelling it ends open long-polls at shutdown.
+	base, cancelRequests := context.WithCancel(context.Background())
+	defer cancelRequests()
+	srv := &http.Server{Handler: api.Handler(b), ReadHeaderTimeout: 10 * time.Second,
+		BaseContext: func(net.Listener) context.Context { return base }}
 	mode := "server"
 	if dev {
 		mode = "dev (temporary data, deleted on exit)"
@@ -100,7 +108,12 @@ func serve(dir, listen string, dev bool) error {
 			return err
 		}
 	}
+	cancelRequests()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	return srv.Shutdown(ctx)
+	if err := srv.Shutdown(ctx); err != nil {
+		// handlers still running: stop them before the store closes underneath them
+		srv.Close()
+	}
+	return nil
 }

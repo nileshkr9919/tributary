@@ -79,6 +79,7 @@ func (s *Subscription) cancelEntries(es []*entry) int {
 		}
 	}
 	if err := b.Commit(); err != nil {
+		s.commitFailed(err)
 		return 0
 	}
 	if n > 0 {

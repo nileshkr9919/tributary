@@ -65,6 +65,7 @@ All bodies are JSON. Payloads are any JSON value.
 | `POST /v1/subscriptions/{sub}/pause` and `/resume` | optional `fairness_value` | ok |
 | `GET /v1/subscriptions/{sub}/dlq` | | dead letters |
 | `POST /v1/subscriptions/{sub}/dlq/requeue` | `ids` | count |
+| `POST /v1/subscriptions/{sub}/release` | `ids` of held messages | count |
 | `GET /metrics`, `GET /healthz` | | |
 
 A delivery carries `id`, `token`, `key`, `headers`, `payload`, `attempt`, `operation_id`,

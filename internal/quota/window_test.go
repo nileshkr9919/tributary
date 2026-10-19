@@ -191,3 +191,17 @@ func TestWindowRefundAdjustsOriginalGrant(t *testing.T) {
 		t.Fatal("over-admitted: 2000 in the window against a 1500 limit")
 	}
 }
+
+// M5: a pool pause is saved immediately, not on the next periodic flush.
+func TestPoolPausePersistsImmediately(t *testing.T) {
+	r, c := newReg(t)
+	r.CreateWith(PoolConfig{Name: "p", Unit: "tokens", PerMinute: 1000, Mode: "window"})
+	r.Pause("p", time.Time{})
+	r2, err := NewRegistry(r.s, c) // reload without calling Flush
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !r2.Stats("p").Paused {
+		t.Fatal("pool pause lost without a flush")
+	}
+}

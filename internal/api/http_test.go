@@ -207,3 +207,19 @@ func TestInvalidNamesAre400(t *testing.T) {
 		}
 	}
 }
+
+func TestReleaseRoute(t *testing.T) {
+	c := newServer(t)
+	c.ok("POST", "/v1/topics", `{"name":"jobs"}`)
+	c.ok("POST", "/v1/subscriptions", `{"name":"w","topic":"jobs","overrides":{"failure":{"on_exhausted":"hold","max_attempts":1}}}`)
+	id := c.ok("POST", "/v1/topics/jobs/messages", `{"messages":[{"payload":1}]}`)["ids"].([]any)[0].(string)
+	d := deliveries(c.ok("POST", "/v1/subscriptions/w/receive", `{"member":"m"}`))[0]
+	c.ok("POST", "/v1/nack", `{"token":"`+d["token"].(string)+`","reason":"retry"}`)
+	out := c.ok("POST", "/v1/subscriptions/w/release", `{"ids":["`+id+`"]}`)
+	if out["released"].(float64) != 1 {
+		t.Fatalf("%v", out)
+	}
+	if ds := deliveries(c.ok("POST", "/v1/subscriptions/w/receive", `{"member":"m"}`)); len(ds) != 1 {
+		t.Fatal("released message not delivered")
+	}
+}

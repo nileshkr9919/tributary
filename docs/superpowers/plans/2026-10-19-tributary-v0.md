@@ -519,7 +519,7 @@ func TestScanPrefixInOrder(t *testing.T) { /* set M/t/0/{3,1,2}; Scan(Prefix('M'
 
 **Files:**
 - Modify: `README.md` (rewrite)
-- Create: `docs/quickstart.md`
+- The quickstart lives in the README's Quickstart section; there is no separate `docs/quickstart.md`.
 
 - [ ] **Step 1: Write the README.**
   - **Opening**:

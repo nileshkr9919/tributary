@@ -9,7 +9,7 @@ import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 
-from .errors import Permanent, QuotaExhausted, Throttled, TributaryError
+from .errors import Permanent, QuotaExhausted, Throttled
 
 log = logging.getLogger("tributary")
 
@@ -102,7 +102,7 @@ class Worker:
                     continue
                 try:
                     deliveries = self.client.receive(self.subscription, self.member, max=free, wait_ms=1000)
-                except (TributaryError, OSError) as e:
+                except Exception as e:  # noqa: BLE001 - keep pulling whatever went wrong
                     log.warning("receive failed: %s", e)
                     time.sleep(0.5)
                     continue
@@ -119,7 +119,7 @@ class Worker:
             while not done.wait(interval):
                 try:
                     job._observe(self.client.extend(job.token, duration=lease_s))
-                except (TributaryError, OSError) as e:
+                except Exception as e:  # noqa: BLE001
                     log.debug("extend failed: %s", e)
                 if job.lost:
                     return
@@ -151,5 +151,5 @@ class Worker:
     def _safe(fn, *args, **kwargs):
         try:
             return fn(*args, **kwargs)
-        except (TributaryError, OSError) as e:
+        except Exception as e:  # noqa: BLE001 - an ack or nack failure must not kill the worker
             log.warning("%s failed: %s", fn.__name__, e)

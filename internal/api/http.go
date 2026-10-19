@@ -37,6 +37,7 @@ func Handler(b *broker.Broker) http.Handler {
 	mux.HandleFunc("POST /v1/subscriptions/{sub}/resume", a.pause(false))
 	mux.HandleFunc("GET /v1/subscriptions/{sub}/dlq", a.dlq)
 	mux.HandleFunc("POST /v1/subscriptions/{sub}/dlq/requeue", a.requeue)
+	mux.HandleFunc("POST /v1/subscriptions/{sub}/release", a.release)
 	mux.HandleFunc("POST /v1/ack", a.ack)
 	mux.HandleFunc("POST /v1/nack", a.nack)
 	mux.HandleFunc("POST /v1/extend", a.extend)
@@ -374,6 +375,20 @@ func (a *api) dlq(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"dead_letters": dl})
 	}
+}
+
+func (a *api) release(w http.ResponseWriter, r *http.Request) {
+	s := a.subFor(w, r)
+	if s == nil {
+		return
+	}
+	var req struct {
+		IDs []string `json:"ids"`
+	}
+	if !decode(w, r, &req) {
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"released": s.Release(req.IDs)})
 }
 
 func (a *api) requeue(w http.ResponseWriter, r *http.Request) {

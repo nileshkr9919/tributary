@@ -29,7 +29,9 @@ func (s *Subscription) handleNack(b *store.Batch, e *entry, n NackRequest, now t
 			return
 		}
 		e.rec.Attempt-- // a throttle is not an attempt
-		s.pauseScope(e, n.Scope, "message", now.Add(ra))
+		if s.pauseScope(e, n.Scope, "message", now.Add(ra)) {
+			s.putConfig(b)
+		}
 		s.delay(b, e, now.Add(ra))
 	case "quota_exhausted":
 		e.rec.Attempt--
@@ -48,6 +50,9 @@ func (s *Subscription) handleNack(b *store.Batch, e *entry, n NackRequest, now t
 			paused = true
 		} else {
 			paused = s.pauseScope(e, scope, "pool", until)
+			if paused {
+				s.putConfig(b)
+			}
 		}
 		if until.IsZero() && !paused {
 			// Nothing was paused (no pool bound, or a message or key scope with no time):
