@@ -327,7 +327,9 @@ func (r *Registry) Pause(name string, until time.Time) {
 		} else if until.After(p.PausedUntil) {
 			p.PausedUntil = until
 		}
-		r.dirty = true
+		if err := r.save(p); err != nil {
+			r.dirty = true
+		}
 	}
 }
 
@@ -338,7 +340,9 @@ func (r *Registry) Resume(name string) {
 	if p, ok := r.pools[name]; ok {
 		p.Manual = false
 		p.PausedUntil = time.Time{}
-		r.dirty = true
+		if err := r.save(p); err != nil {
+			r.dirty = true
+		}
 	}
 }
 

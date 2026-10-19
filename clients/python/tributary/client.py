@@ -2,9 +2,15 @@
 
 import json
 import urllib.error
+import urllib.parse
 import urllib.request
 
 from .errors import TributaryError
+
+
+def _q(name):
+    """URL-escape a topic, subscription or pool name for use in a path."""
+    return urllib.parse.quote(str(name), safe="")
 
 
 class Client:
@@ -72,29 +78,33 @@ class Client:
             raise
 
     def stats(self, subscription):
-        return self._req("GET", f"/v1/subscriptions/{subscription}")
+        return self._req("GET", f"/v1/subscriptions/{_q(subscription)}")
 
     def pools(self):
         return self._req("GET", "/v1/pools")["pools"]
 
     def resume_pool(self, name):
-        return self._req("POST", f"/v1/pools/{name}/resume", {})
+        return self._req("POST", f"/v1/pools/{_q(name)}/resume", {})
 
     def cancel(self, subscription, id=None, key=None):
         body = {"id": id} if id else {"key": key}
-        return self._req("POST", f"/v1/subscriptions/{subscription}/cancel", body)["cancelled"]
+        return self._req("POST", f"/v1/subscriptions/{_q(subscription)}/cancel", body)["cancelled"]
 
     def pause(self, subscription, value=None):
-        return self._req("POST", f"/v1/subscriptions/{subscription}/pause", {"fairness_value": value or ""})
+        return self._req("POST", f"/v1/subscriptions/{_q(subscription)}/pause", {"fairness_value": value or ""})
 
     def resume(self, subscription, value=None):
-        return self._req("POST", f"/v1/subscriptions/{subscription}/resume", {"fairness_value": value or ""})
+        return self._req("POST", f"/v1/subscriptions/{_q(subscription)}/resume", {"fairness_value": value or ""})
 
     def dead_letters(self, subscription):
-        return self._req("GET", f"/v1/subscriptions/{subscription}/dlq")["dead_letters"]
+        return self._req("GET", f"/v1/subscriptions/{_q(subscription)}/dlq")["dead_letters"]
 
     def requeue(self, subscription, ids):
-        return self._req("POST", f"/v1/subscriptions/{subscription}/dlq/requeue", {"ids": list(ids)})["requeued"]
+        return self._req("POST", f"/v1/subscriptions/{_q(subscription)}/dlq/requeue", {"ids": list(ids)})["requeued"]
+
+    def release(self, subscription, ids):
+        """Return held messages (on_exhausted: hold) to pending with a fresh attempt count."""
+        return self._req("POST", f"/v1/subscriptions/{_q(subscription)}/release", {"ids": list(ids)})["released"]
 
     # --- produce -----------------------------------------------------------
     @staticmethod
@@ -114,17 +124,17 @@ class Client:
 
     def publish(self, topic, payload, key=None, headers=None, priority=None, idempotency_key=None, deliver_at=None):
         msg = self._message(payload, key, headers, priority, idempotency_key, deliver_at)
-        return self._req("POST", f"/v1/topics/{topic}/messages", {"messages": [msg]})["ids"][0]
+        return self._req("POST", f"/v1/topics/{_q(topic)}/messages", {"messages": [msg]})["ids"][0]
 
     def publish_many(self, topic, items):
         """items: dicts with payload and optional key, headers, priority, idempotency_key, deliver_at."""
         msgs = [self._message(**it) for it in items]
-        return self._req("POST", f"/v1/topics/{topic}/messages", {"messages": msgs})["ids"]
+        return self._req("POST", f"/v1/topics/{_q(topic)}/messages", {"messages": msgs})["ids"]
 
     # --- consume -----------------------------------------------------------
     def receive(self, subscription, member, max=1, wait_ms=0):
         body = {"member": member, "max": max, "wait_ms": wait_ms}
-        return self._req("POST", f"/v1/subscriptions/{subscription}/receive", body)["deliveries"]
+        return self._req("POST", f"/v1/subscriptions/{_q(subscription)}/receive", body)["deliveries"]
 
     def ack(self, token, usage=None):
         a = {"token": token}

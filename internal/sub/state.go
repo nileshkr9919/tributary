@@ -69,6 +69,7 @@ type record struct {
 	Reason     string          `json:"r,omitempty"`
 	Ref        string          `json:"ref,omitempty"` // dead-letter copy holding the payload, for requeued messages
 	Notified   string          `json:"n,omitempty"`   // status to report to the old holder: superseded or cancelled
+	Gen        int             `json:"g,omitempty"`   // how many times this message was requeued from dead letters
 }
 
 // Delivery is one leased message handed to a consumer.
@@ -94,6 +95,13 @@ type DeadLetter struct {
 	Attempts int       `json:"attempts"`
 	At       time.Time `json:"at"`
 	State    string    `json:"state"` // dead or requeued
+	Gen      int       `json:"gen,omitempty"`
+}
+
+// absent reports whether a checkpoint is missing or JSON null; neither replaces a stored one.
+func absent(c []byte) bool {
+	t := string(c)
+	return len(c) == 0 || t == "null"
 }
 
 // NackRequest describes a negative acknowledgement.

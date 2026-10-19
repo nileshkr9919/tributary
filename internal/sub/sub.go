@@ -26,13 +26,17 @@ type Deps struct {
 	Topics *topic.Manager
 	Clock  clock.Clock
 	Gate   Gate
+	// OnCommitError is called when a disk write fails. The default stops the process:
+	// continuing would leave memory and disk disagreeing.
+	OnCommitError func(error)
 }
 
 type config struct {
-	Name     string            `json:"name"`
-	Topic    string            `json:"topic"`
-	Settings settings.Settings `json:"settings"`
-	Paused   map[string]bool   `json:"paused,omitempty"` // "" = whole subscription, else fairness value
+	Name       string               `json:"name"`
+	Topic      string               `json:"topic"`
+	Settings   settings.Settings    `json:"settings"`
+	Paused     map[string]bool      `json:"paused,omitempty"`      // "" = whole subscription, else fairness value
+	PauseUntil map[string]time.Time `json:"pause_until,omitempty"` // throttle pauses: "" subscription, "v:", "k:"
 }
 
 // Subscription is one named consumer of a topic.
@@ -133,12 +137,20 @@ func open(cfg config, d Deps) (*Subscription, error) {
 	if cfg.Paused == nil {
 		cfg.Paused = map[string]bool{}
 	}
+	if cfg.PauseUntil == nil {
+		cfg.PauseUntil = map[string]time.Time{}
+	}
+	if d.OnCommitError == nil {
+		d.OnCommitError = func(err error) {
+			log.Fatalf("tributary: disk write failed, stopping so memory and disk cannot disagree: %v", err)
+		}
+	}
 	s := &Subscription{
 		cfg: cfg, dlq: DeadLetterTopic(cfg.Topic, cfg.Name), d: d,
 		entries: map[pos]*entry{}, floors: map[int]uint64{}, terminal: map[int]map[uint64]bool{},
 		sched: newScheduler(cfg.Settings), deadLetters: map[string]*DeadLetter{},
 		changed: make(chan struct{}), busyKeys: map[string]int{}, keyQueue: map[string][]*entry{},
-		inFlightVal: map[string]int{}, pauseUntil: map[string]time.Time{}, usage: map[[2]string]float64{},
+		inFlightVal: map[string]int{}, pauseUntil: cfg.PauseUntil, usage: map[[2]string]float64{},
 		nextOff: map[int]uint64{}, arrivals: map[int]map[uint64]topic.Message{},
 	}
 	// Listen before scanning, so nothing produced during recovery is missed; arrivals wait
@@ -163,6 +175,7 @@ func (s *Subscription) recover() error {
 		return ErrTopicNotFound
 	}
 	now := s.d.Clock.Now()
+	var recovered []*entry
 	for sh := 0; sh < shards; sh++ {
 		s.terminal[sh] = map[uint64]bool{}
 		if v, ok, err := s.d.Store.Get(store.Key(store.TagFloor, s.cfg.Name, uint64(sh))); err != nil {
@@ -197,7 +210,7 @@ func (s *Subscription) recover() error {
 			if has {
 				e.rec = r
 			}
-			s.track(e)
+			recovered = append(recovered, e)
 			return nil
 		})
 		if err != nil {
@@ -216,8 +229,14 @@ func (s *Subscription) recover() error {
 			e.p = pos{sh, off}
 			e.ref = r.Ref
 			e.rec = r
-			s.track(e)
+			recovered = append(recovered, e)
 		}
+	}
+	// Queue in the order messages became eligible, across shards, so the overdue lane's
+	// oldest-first scan holds after a restart.
+	sort.SliceStable(recovered, func(i, j int) bool { return recovered[i].rec.Eligible.Before(recovered[j].rec.Eligible) })
+	for _, e := range recovered {
+		s.track(e)
 	}
 	err = s.d.Store.Scan(store.Prefix(store.TagDeadLetter, s.cfg.Name), func(k, v []byte) error {
 		var dl DeadLetter
@@ -378,7 +397,7 @@ func (s *Subscription) OnAppend(ms []topic.Message) {
 		}
 	}
 	if err := b.Commit(); err != nil {
-		log.Printf("sub %s: arrival commit failed: %v", s.cfg.Name, err)
+		s.commitFailed(err)
 	}
 	s.notify()
 }
@@ -461,8 +480,9 @@ func (s *Subscription) Receive(member string, max int) []Delivery {
 		return nil
 	}
 	if err := b.Commit(); err != nil {
-		log.Printf("sub %s: lease commit failed: %v", s.cfg.Name, err)
+		s.commitFailed(err)
 		for _, u := range picked {
+			s.d.Gate.Settle(s.cfg.Name, u.e.rec.Charged, u.e.rec.LeaseStart, nil)
 			s.leaseOff(u.e)
 			if !u.hadKey {
 				s.releaseKey(u.e)
@@ -555,6 +575,7 @@ func (s *Subscription) Ack(tok string, usage map[string]float64) (Status, error)
 	}
 	s.finish(b, e, final, "")
 	if err := b.Commit(); err != nil {
+		s.commitFailed(err)
 		return StatusLost, err
 	}
 	s.afterRelease(e)
@@ -586,23 +607,26 @@ func (s *Subscription) Extend(tok string, d time.Duration, checkpoint json.RawMe
 		return st, nil
 	}
 	now := s.d.Clock.Now()
-	if !s.cfg.Settings.Lease.Extendable && d > 0 {
+	deadline := e.rec.Deadline
+	if s.cfg.Settings.Lease.Extendable {
+		if d <= 0 {
+			d = s.cfg.Settings.Lease.Initial
+		}
+		deadline = now.Add(d)
+		if limit := e.rec.LeaseStart.Add(s.cfg.Settings.Lease.MaxTotal); deadline.After(limit) {
+			deadline = limit
+		}
+	} else if d > 0 {
 		return st, ErrNotExtendable
 	}
-	if d <= 0 {
-		d = s.cfg.Settings.Lease.Initial
-	}
-	deadline := now.Add(d)
-	if limit := e.rec.LeaseStart.Add(s.cfg.Settings.Lease.MaxTotal); deadline.After(limit) {
-		deadline = limit
-	}
 	e.rec.Deadline = deadline
-	if len(checkpoint) > 0 {
+	if !absent(checkpoint) {
 		e.rec.Checkpoint = append(json.RawMessage(nil), checkpoint...)
 	}
 	b := s.d.Store.NewBatch()
 	s.putRecord(b, e)
 	if err := b.Commit(); err != nil {
+		s.commitFailed(err)
 		return StatusLost, err
 	}
 	s.leases.push(timerItem{at: deadline, p: e.p, tag: e.rec.LeaseID})
@@ -625,7 +649,7 @@ func (s *Subscription) Nack(tok string, n NackRequest) (Status, error) {
 	}
 	now := s.d.Clock.Now()
 	b := s.d.Store.NewBatch()
-	if len(n.Checkpoint) > 0 {
+	if !absent(n.Checkpoint) {
 		e.rec.Checkpoint = append(json.RawMessage(nil), n.Checkpoint...)
 	}
 	e.rec.Expiries = 0
@@ -641,6 +665,7 @@ func (s *Subscription) Nack(tok string, n NackRequest) (Status, error) {
 		s.handleNack(b, e, n, now)
 	}
 	if err := b.Commit(); err != nil {
+		s.commitFailed(err)
 		return StatusLost, err
 	}
 	s.afterRelease(e)
@@ -718,7 +743,7 @@ func (s *Subscription) deadLetter(b *store.Batch, e *entry, reason string, now t
 	}
 	copies, err := s.d.Topics.Produce(s.dlq, []topic.Input{{
 		Key: e.key, Headers: h, Payload: src.Payload, Priority: e.priority,
-		IdempotencyKey: fmt.Sprintf("%s#dl#%d", id, e.rec.Attempt),
+		IdempotencyKey: fmt.Sprintf("%s#dl#%d#%d", id, e.rec.Gen, e.rec.Attempt),
 	}})
 	copyID := ""
 	if err == nil && len(copies) == 1 {
@@ -726,7 +751,7 @@ func (s *Subscription) deadLetter(b *store.Batch, e *entry, reason string, now t
 	} else {
 		log.Printf("sub %s: dead-letter copy failed: %v", s.cfg.Name, err)
 	}
-	dl := &DeadLetter{SourceID: id, CopyID: copyID, Reason: reason, Attempts: e.rec.Attempt, At: now, State: "dead"}
+	dl := &DeadLetter{SourceID: id, CopyID: copyID, Reason: reason, Attempts: e.rec.Attempt, At: now, State: "dead", Gen: e.rec.Gen}
 	s.deadLetters[id] = dl
 	v, _ := json.Marshal(dl)
 	b.Set(store.Key(store.TagDeadLetter, s.cfg.Name, id), v)
@@ -795,6 +820,7 @@ func (s *Subscription) Tick() {
 		s.leaseOff(e)
 		if e.rec.Notified != "" {
 			// superseded or cancelled while leased: the lease ending is its end
+			s.d.Gate.Settle(s.cfg.Name, e.rec.Charged, e.rec.LeaseStart, nil)
 			s.finish(b, e, e.rec.Notified, "")
 			s.afterRelease(e)
 			woke = true
@@ -831,11 +857,12 @@ func (s *Subscription) Tick() {
 		woke = true
 	}
 	if s.pausesExpired(now) {
+		s.putConfig(b)
 		woke = true
 	}
 	if !b.Empty() {
 		if err := b.Commit(); err != nil {
-			log.Printf("sub %s: tick commit failed: %v", s.cfg.Name, err)
+			s.commitFailed(err)
 		}
 	} else {
 		b.Commit()
@@ -854,6 +881,55 @@ func (s *Subscription) UsageTotals() map[[2]string]float64 {
 		out[k] = v
 	}
 	return out
+}
+
+// commitFailed reports a failed disk write. By default the process stops.
+func (s *Subscription) commitFailed(err error) {
+	log.Printf("sub %s: commit failed: %v", s.cfg.Name, err)
+	s.d.OnCommitError(err)
+}
+
+// putConfig stages the subscription's configuration (including pauses) in b.
+func (s *Subscription) putConfig(b *store.Batch) {
+	v, _ := json.Marshal(s.cfg)
+	b.Set(store.Key(store.TagSub, s.cfg.Name), v)
+}
+
+// Release returns held messages to pending with a fresh attempt count.
+func (s *Subscription) Release(ids []string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := s.d.Clock.Now()
+	b := s.d.Store.NewBatch()
+	var released []*entry
+	for _, id := range ids {
+		t, sh, off, err := topic.ParseID(id)
+		if err != nil || t != s.cfg.Topic {
+			continue
+		}
+		e, ok := s.entries[pos{sh, off}]
+		if !ok || e.rec.State != stateHeld {
+			continue
+		}
+		e.rec.State = statePending
+		e.rec.Attempt, e.rec.Expiries, e.rec.Throttled = 0, 0, 0
+		e.rec.Eligible = now
+		s.putRecord(b, e)
+		released = append(released, e)
+	}
+	if len(released) == 0 {
+		b.Commit()
+		return 0
+	}
+	if err := b.Commit(); err != nil {
+		s.commitFailed(err)
+		return 0
+	}
+	for _, e := range released {
+		s.enqueue(e)
+	}
+	s.notify()
+	return len(released)
 }
 
 // Counts returns the number of messages in each non-terminal state, plus dead letters.
@@ -909,7 +985,7 @@ func (s *Subscription) Requeue(ids []string) int {
 		e := s.newEntry(cp, now)
 		e.p = pos{sh, off}
 		e.ref = dl.CopyID
-		e.rec = record{State: statePending, Eligible: now, Ref: dl.CopyID}
+		e.rec = record{State: statePending, Eligible: now, Ref: dl.CopyID, Gen: dl.Gen + 1}
 		if cpj := cp.Headers["trib-checkpoint"]; cpj != "" {
 			e.rec.Checkpoint = json.RawMessage(cpj)
 		}
@@ -925,6 +1001,7 @@ func (s *Subscription) Requeue(ids []string) int {
 		return 0
 	}
 	if err := b.Commit(); err != nil {
+		s.commitFailed(err)
 		return 0
 	}
 	for _, e := range added {
